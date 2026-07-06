@@ -41,5 +41,16 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- 允许 url_launcher 查询并调起高德地图 App，否则 Android 11+ 可能判断不到 androidamap scheme。 -->
+        <package android:name="com.autonavi.minimap"/>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="androidamap"/>
+        </intent>
+        <!-- 高德 App 不可用时使用浏览器地图链接兜底，因此也声明 https 查询能力。 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
     </queries>
 </manifest>

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../config/amap_config.dart';
 import '../data/mock_life_repository.dart';
 import '../models/life_category.dart';
 import '../models/place.dart';
@@ -407,7 +408,7 @@ class _MapResultsScreen extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '已按“${category.amapKeyword}”准备高德 POI 查询',
+                      '已按“${category.amapKeyword}”准备高德 POI 查询 · ${amapConfig.hasWebServiceConfig ? '高德 Web服务已配置' : '高德 Web服务未配置'}',
                       style: const TextStyle(
                         color: AppColors.muted,
                         fontSize: 12,

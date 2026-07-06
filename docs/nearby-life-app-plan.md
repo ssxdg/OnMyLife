@@ -71,11 +71,19 @@
 - 已完成本地收藏，收藏点位 id 保存在设备本地。
 - 已完成“去这里”导航入口，优先尝试调起高德地图，失败后使用 Web 地图兜底。
 - 暂未接入真实高德地图 SDK，原因是需要高德 Key 和原生平台配置。
+- 已配置高德 Web端 Key、安全密钥和 Web服务 Key 的本地读取入口，真实值保存在 `env/amap.local.json`，不会提交到 Git。
+- 当前截图中的 Key 可用于 Web端/ Web服务场景；如果后续接入高德 Android/iOS 原生地图 SDK，还需要在高德控制台新增 Android/iOS 平台 Key。
 
 ### 新增依赖
 
 - `shared_preferences`：用于保存本地收藏点位 id。首版只保存少量字符串，不需要引入数据库。
 - `url_launcher`：用于调起高德地图 Scheme 或浏览器兜底链接，实现“去这里”导航入口。
+
+### 本地打包参数
+
+- 调试 APK 打包命令：`powershell -ExecutionPolicy Bypass -File scripts/build-debug-apk.ps1`
+- 等价 Flutter 命令：`C:\tools\flutter\bin\flutter.bat build apk --debug --dart-define-from-file=env/amap.local.json`
+- 当前 Android 环境仍需要补齐 NDK 和 cmdline-tools 后才能完成 APK 构建。
 
 ### 地图与 POI
 
