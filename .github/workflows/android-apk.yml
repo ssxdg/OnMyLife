@@ -1,0 +1,78 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Flutter debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          # Flutter Android 工程当前使用 Java 17 编译目标，云端固定同版本可以避免 Gradle 编译环境不一致。
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          # 使用 stable 通道让 GitHub 服务器自动安装当前稳定版 Flutter，满足 pubspec 中较新的 Dart SDK 约束。
+          channel: stable
+          cache: true
+
+      - name: Generate AMap dart-define file
+        shell: bash
+        env:
+          AMAP_WEB_KEY: ${{ secrets.AMAP_WEB_KEY }}
+          AMAP_WEB_SECURITY_CODE: ${{ secrets.AMAP_WEB_SECURITY_CODE }}
+          AMAP_WEB_SERVICE_KEY: ${{ secrets.AMAP_WEB_SERVICE_KEY }}
+        run: |
+          # 真实高德 Key 不写入仓库，构建时从 GitHub Secrets 生成本地配置文件，和本地脚本的入参保持一致。
+          mkdir -p env
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          values = {
+              "AMAP_WEB_KEY": os.environ.get("AMAP_WEB_KEY", ""),
+              "AMAP_WEB_SECURITY_CODE": os.environ.get("AMAP_WEB_SECURITY_CODE", ""),
+              "AMAP_WEB_SERVICE_KEY": os.environ.get("AMAP_WEB_SERVICE_KEY", ""),
+          }
+
+          missing = [key for key, value in values.items() if not value]
+          if missing:
+              sys.exit("Missing GitHub Secrets: " + ", ".join(missing))
+
+          with open("env/amap.local.json", "w", encoding="utf-8") as file:
+              json.dump(values, file, ensure_ascii=False, indent=2)
+              file.write("\n")
+          PY
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Build debug APK
+        run: flutter build apk --debug --dart-define-from-file=env/amap.local.json
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # artifact 名称带上提交 SHA 前缀，方便在多次 push 后区分每次云端打包产物。
+          name: on-my-life-debug-apk-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
