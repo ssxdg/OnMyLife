@@ -24,15 +24,58 @@ class AmapConfig {
 
   Uri buildAroundSearchUri({
     required String keyword,
+    List<String> types = const [],
     required double latitude,
     required double longitude,
     int radiusMeters = 2000,
+    int page = 1,
+    int offset = 20,
   }) {
-    return Uri.https('restapi.amap.com', '/v3/place/around', {
+    final queryParameters = <String, String>{
       'key': webServiceKey,
       'keywords': keyword,
       'location': '$longitude,$latitude',
       'radius': radiusMeters.toString(),
+      'sortrule': 'distance',
+      'extensions': 'all',
+      'page': page.toString(),
+      'offset': offset.toString(),
+      'output': 'json',
+    };
+    if (types.isNotEmpty) {
+      // 高德支持多个 POI 类型用竖线分隔；保留关键词是为了兼容用户常见类别叫法。
+      queryParameters['types'] = types.join('|');
+    }
+
+    return Uri.https('restapi.amap.com', '/v3/place/around', queryParameters);
+  }
+
+  Uri buildCoordinateConvertUri({
+    required double latitude,
+    required double longitude,
+  }) {
+    // 手机系统定位通常返回 GPS/WGS84 坐标；高德地图和 POI 搜索使用高德坐标，
+    // 先转换再搜索可以减少国内地图常见的坐标偏移。
+    return Uri.https('restapi.amap.com', '/v3/assistant/coordinate/convert', {
+      'key': webServiceKey,
+      'locations': '$longitude,$latitude',
+      'coordsys': 'gps',
+      'output': 'json',
+    });
+  }
+
+  Uri buildReverseGeocodeUri({
+    required double latitude,
+    required double longitude,
+    int radiusMeters = 1000,
+  }) {
+    // 逆地理编码用于展示当前位置的街道、地址和附近地标，
+    // 让用户看到的是可理解的位置描述，而不是只有一个大概方向。
+    return Uri.https('restapi.amap.com', '/v3/geocode/regeo', {
+      'key': webServiceKey,
+      'location': '$longitude,$latitude',
+      'radius': radiusMeters.toString(),
+      'extensions': 'all',
       'output': 'json',
     });
   }

@@ -23,6 +23,7 @@ class MockLifeRepository {
       icon: Icons.restaurant_rounded,
       colorValue: 0xFFFF7E67,
       amapKeyword: '美食',
+      amapTypes: ['050000'],
     ),
     LifeCategory(
       id: 'hospital',
@@ -30,6 +31,7 @@ class MockLifeRepository {
       icon: Icons.local_hospital_rounded,
       colorValue: 0xFF4ECDC4,
       amapKeyword: '医院',
+      amapTypes: ['090000'],
     ),
     LifeCategory(
       id: 'pharmacy',
@@ -37,6 +39,7 @@ class MockLifeRepository {
       icon: Icons.medication_rounded,
       colorValue: 0xFF6BCB77,
       amapKeyword: '药店',
+      amapTypes: ['090601'],
     ),
     LifeCategory(
       id: 'pet',
@@ -44,6 +47,7 @@ class MockLifeRepository {
       icon: Icons.pets_rounded,
       colorValue: 0xFFFFB84D,
       amapKeyword: '宠物服务',
+      amapTypes: ['071500'],
     ),
     LifeCategory(
       id: 'toilet',
@@ -51,6 +55,7 @@ class MockLifeRepository {
       icon: Icons.wc_rounded,
       colorValue: 0xFF45B7D1,
       amapKeyword: '公共厕所',
+      amapTypes: ['200300'],
     ),
     LifeCategory(
       id: 'parking',
@@ -58,6 +63,7 @@ class MockLifeRepository {
       icon: Icons.local_parking_rounded,
       colorValue: 0xFF7C83FD,
       amapKeyword: '停车场',
+      amapTypes: ['150900'],
     ),
     LifeCategory(
       id: 'gas',
@@ -65,6 +71,7 @@ class MockLifeRepository {
       icon: Icons.local_gas_station_rounded,
       colorValue: 0xFFFF9671,
       amapKeyword: '加油站',
+      amapTypes: ['010100'],
     ),
     LifeCategory(
       id: 'charging',
@@ -72,6 +79,7 @@ class MockLifeRepository {
       icon: Icons.ev_station_rounded,
       colorValue: 0xFF2EC4B6,
       amapKeyword: '充电站',
+      amapTypes: ['011100'],
     ),
     LifeCategory(
       id: 'bank',
@@ -79,6 +87,7 @@ class MockLifeRepository {
       icon: Icons.account_balance_rounded,
       colorValue: 0xFF5C7AEA,
       amapKeyword: '银行',
+      amapTypes: ['160300'],
     ),
     LifeCategory(
       id: 'store',
@@ -86,6 +95,7 @@ class MockLifeRepository {
       icon: Icons.storefront_rounded,
       colorValue: 0xFFFFB703,
       amapKeyword: '便利店',
+      amapTypes: ['060200'],
     ),
   ];
 

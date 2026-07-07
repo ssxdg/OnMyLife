@@ -1,4 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 真实地图瓦片、高德 WebService 和 WebView 都需要联网。 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 只申请前台定位权限，用于按手机当前位置查找最近 POI，不申请后台定位。 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+
     <application
         android:label="on_my_life"
         android:name="${applicationName}"
