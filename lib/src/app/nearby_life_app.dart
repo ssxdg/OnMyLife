@@ -55,6 +55,8 @@ class LifeHomeScreen extends StatefulWidget {
 }
 
 class _LifeHomeScreenState extends State<LifeHomeScreen> {
+  static const String _locationConsentKey = 'location_consent_accepted';
+
   // 仓库放在页面状态内，确保收藏切换可以在当前运行周期保留，同时不引入账号和持久化复杂度。
   MockLifeRepository _repository = MockLifeRepository();
   FavoriteStorage? _favoriteStorage;
@@ -114,6 +116,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
                 statusMessage: _statusMessage,
                 isLoadingPlaces: _isLoadingPlaces,
                 onBack: _handleBack,
+                onRetry: _retrySelectedCategory,
                 onFavoriteToggle: _toggleFavorite,
               ),
       ),
@@ -138,6 +141,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
 
     setState(() {
       _favoriteStorage = storage;
+      _hasLocationConsent = preferences.getBool(_locationConsentKey) ?? false;
       _favoritePlaceIds = storage.loadFavoritePlaceIds();
       _repository = MockLifeRepository(favoritePlaceIds: _favoritePlaceIds);
       _places = _applyFavoriteState(_places);
@@ -177,10 +181,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
         _statusMessage = '正在校准高德地图坐标';
       });
 
-      final coordinate = await _placeProvider.convertGpsToAmap(
-        latitude: deviceLocation.latitude,
-        longitude: deviceLocation.longitude,
-      );
+      final coordinate = await _resolveAmapCoordinate(deviceLocation);
       if (!mounted) {
         return;
       }
@@ -190,10 +191,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
         _statusMessage = '正在读取当前位置详情';
       });
 
-      final locationSummary = await _placeProvider.reverseGeocode(
-        latitude: coordinate.latitude,
-        longitude: coordinate.longitude,
-      );
+      final locationSummary = await _resolveLocationSummary(coordinate);
       if (!mounted) {
         return;
       }
@@ -247,6 +245,41 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
     }
   }
 
+  Future<AmapCoordinate> _resolveAmapCoordinate(
+    DeviceLocation deviceLocation,
+  ) async {
+    try {
+      return await _placeProvider.convertGpsToAmap(
+        latitude: deviceLocation.latitude,
+        longitude: deviceLocation.longitude,
+      );
+    } on AmapServiceException {
+      // 坐标转换接口失败时不直接回退 mock；手机定位坐标仍可作为搜索中心继续尝试，
+      // 这样网络短暂抖动或单接口异常不会让用户马上看到假数据。
+      return AmapCoordinate(
+        latitude: deviceLocation.latitude,
+        longitude: deviceLocation.longitude,
+      );
+    }
+  }
+
+  Future<AmapLocationSummary> _resolveLocationSummary(
+    AmapCoordinate coordinate,
+  ) async {
+    try {
+      return await _placeProvider.reverseGeocode(
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+      );
+    } on AmapServiceException {
+      // 地址详情只是辅助信息，失败时不应该阻断 POI 查询；保留当前位置占位即可。
+      return const AmapLocationSummary(
+        formattedAddress: '当前位置',
+        nearbyLandmarks: [],
+      );
+    }
+  }
+
   void _showLocalFallback(LifeCategory category, String message) {
     setState(() {
       _places = _applyFavoriteState(_repository.placesForCategory(category.id));
@@ -254,7 +287,15 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
       _isLoadingPlaces = false;
       _statusMessage = message;
     });
-    _showSnackBar(message);
+  }
+
+  void _retrySelectedCategory() {
+    final category = _selectedCategory;
+    if (category == null || _isLoadingPlaces) {
+      return;
+    }
+
+    _loadCategory(category);
   }
 
   void _toggleFavorite(Place place) {
@@ -286,6 +327,20 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
     );
+  }
+
+  Future<void> _acceptLocationConsent(LifeCategory category) async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(_locationConsentKey, true);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _hasLocationConsent = true;
+      _locationDenied = false;
+    });
+    _loadCategory(category);
   }
 
   void _showLocationConsent(LifeCategory category) {
@@ -321,11 +376,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
               FilledButton(
                 onPressed: () {
                   Navigator.of(context).pop();
-                  setState(() {
-                    _hasLocationConsent = true;
-                    _locationDenied = false;
-                  });
-                  _loadCategory(category);
+                  _acceptLocationConsent(category);
                 },
                 style: FilledButton.styleFrom(
                   minimumSize: const Size.fromHeight(48),
@@ -567,6 +618,7 @@ class _MapResultsScreen extends StatelessWidget {
     required this.statusMessage,
     required this.isLoadingPlaces,
     required this.onBack,
+    required this.onRetry,
     required this.onFavoriteToggle,
   });
 
@@ -579,6 +631,7 @@ class _MapResultsScreen extends StatelessWidget {
   final String? statusMessage;
   final bool isLoadingPlaces;
   final VoidCallback onBack;
+  final VoidCallback onRetry;
   final ValueChanged<Place> onFavoriteToggle;
 
   @override
@@ -616,6 +669,15 @@ class _MapResultsScreen extends StatelessWidget {
                       ),
                     ),
                   ],
+                ),
+              ),
+              TextButton.icon(
+                onPressed: isLoadingPlaces ? null : onRetry,
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('重试'),
+                style: TextButton.styleFrom(
+                  foregroundColor: AppColors.mint,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
                 ),
               ),
             ],
