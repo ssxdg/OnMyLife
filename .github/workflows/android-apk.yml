@@ -36,9 +36,9 @@ jobs:
       - name: Generate AMap dart-define file
         shell: bash
         env:
-          AMAP_WEB_KEY: ${{ secrets.AMAP_WEB_KEY }}
-          AMAP_WEB_SECURITY_CODE: ${{ secrets.AMAP_WEB_SECURITY_CODE }}
-          AMAP_WEB_SERVICE_KEY: ${{ secrets.AMAP_WEB_SERVICE_KEY }}
+          AMAP_WEB_KEY: ${{ secrets.AMAP_WEB_KEY || vars.AMAP_WEB_KEY }}
+          AMAP_WEB_SECURITY_CODE: ${{ secrets.AMAP_WEB_SECURITY_CODE || vars.AMAP_WEB_SECURITY_CODE }}
+          AMAP_WEB_SERVICE_KEY: ${{ secrets.AMAP_WEB_SERVICE_KEY || vars.AMAP_WEB_SERVICE_KEY }}
         run: |
           # 真实高德 Key 不写入仓库，构建时从 GitHub Secrets 生成本地配置文件，和本地脚本的入参保持一致。
           mkdir -p env
@@ -55,7 +55,7 @@ jobs:
 
           missing = [key for key, value in values.items() if not value]
           if missing:
-              sys.exit("Missing GitHub Secrets: " + ", ".join(missing))
+              sys.exit("Missing GitHub Secrets or Variables: " + ", ".join(missing))
 
           with open("env/amap.local.json", "w", encoding="utf-8") as file:
               json.dump(values, file, ensure_ascii=False, indent=2)
