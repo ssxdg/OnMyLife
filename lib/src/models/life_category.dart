@@ -5,6 +5,12 @@ import 'package:flutter/material.dart';
 /// 这里同时保留业务 id、界面展示名称和高德查询关键词，是为了让 UI 不直接依赖地图服务字段。
 /// 后续接入高德 POI 时，只需要替换映射来源，不需要改动首页类别组件。
 class LifeCategory {
+  /// 自由关键词搜索使用固定 id，避免把用户输入直接拼进业务标识。
+  ///
+  /// 搜索结果仍然通过现有类别查询链路加载，但固定 id 可以让降级逻辑明确区分
+  /// “预设类别”和“临时关键词”，从而避免接口失败时展示不相关的模拟点位。
+  static const String keywordSearchId = 'keyword-search';
+
   const LifeCategory({
     required this.id,
     required this.name,
@@ -13,6 +19,25 @@ class LifeCategory {
     required this.amapKeyword,
     this.amapTypes = const [],
   });
+
+  /// 创建临时关键词搜索类别。
+  ///
+  /// 在模型入口统一去除首尾空格，是为了让标题、请求参数和重试操作始终使用
+  /// 同一个规范化关键词；自由搜索不限定 POI 编码，交由高德按用户原词召回。
+  factory LifeCategory.keywordSearch(String keyword) {
+    final normalizedKeyword = keyword.trim();
+    if (normalizedKeyword.isEmpty) {
+      throw ArgumentError.value(keyword, 'keyword', '搜索关键词不能为空');
+    }
+
+    return LifeCategory(
+      id: keywordSearchId,
+      name: normalizedKeyword,
+      icon: Icons.search_rounded,
+      colorValue: 0xFF18A999,
+      amapKeyword: normalizedKeyword,
+    );
+  }
 
   final String id;
   final String name;
@@ -27,4 +52,7 @@ class LifeCategory {
   final List<String> amapTypes;
 
   Color get color => Color(colorValue);
+
+  /// 是否为用户临时输入的自由关键词搜索。
+  bool get isKeywordSearch => id == keywordSearchId;
 }

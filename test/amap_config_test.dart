@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:on_my_life/src/config/amap_config.dart';
 import 'package:on_my_life/src/data/mock_life_repository.dart';
+import 'package:on_my_life/src/models/life_category.dart';
 import 'package:on_my_life/src/services/amap_place_service.dart';
 
 void main() {
@@ -103,6 +104,33 @@ void main() {
     expect(result.radiusMeters, 10000);
     expect(result.places.map((place) => place.name), ['最近餐厅', '远处餐厅']);
     expect(result.places.map((place) => place.distanceMeters), [2300, 9200]);
+  });
+
+  test('自由关键词搜索不附带固定 POI 分类编码', () async {
+    const config = AmapConfig(
+      webKey: 'web-key',
+      webSecurityCode: 'web-security-code',
+      webServiceKey: 'web-service-key',
+    );
+    final client = MockClient((request) async {
+      expect(request.url.queryParameters['keywords'], '博物馆');
+      expect(request.url.queryParameters.containsKey('types'), isFalse);
+      return http.Response('{"status":"1","pois":[]}', 200);
+    });
+    final service = AmapPlaceService(
+      config: config,
+      client: client,
+      searchRadiiMeters: const [1000],
+    );
+
+    final result = await service.searchNearestPlaces(
+      category: LifeCategory.keywordSearch('博物馆'),
+      latitude: 31.2309,
+      longitude: 121.4741,
+    );
+
+    expect(result.places, isEmpty);
+    expect(result.radiusMeters, 1000);
   });
 
   test('高德服务可以把手机 GPS 坐标转换为高德坐标', () async {

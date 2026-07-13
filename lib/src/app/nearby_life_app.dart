@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'amap_web_map.dart';
+import 'nearby_search_field.dart';
 import '../config/amap_config.dart';
 import '../data/mock_life_repository.dart';
 import '../models/life_category.dart';
@@ -105,6 +106,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
                 categories: _repository.categories,
                 showLocationFallback: _locationDenied,
                 onCategorySelected: _handleCategorySelected,
+                onSearchSubmitted: _handleKeywordSearch,
               )
             : _MapResultsScreen(
                 category: selectedCategory,
@@ -118,6 +120,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
                 onBack: _handleBack,
                 onRetry: _retrySelectedCategory,
                 onFavoriteToggle: _toggleFavorite,
+                onSearchSubmitted: _handleKeywordSearch,
               ),
       ),
     );
@@ -130,6 +133,12 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
     }
 
     _showLocationConsent(category);
+  }
+
+  void _handleKeywordSearch(String keyword) {
+    // 关键词被包装为临时类别后，可以完整复用定位授权、坐标转换、扩圈查询、
+    // 地图展示和重试链路，不需要再维护一套并行的搜索页面状态。
+    _handleCategorySelected(LifeCategory.keywordSearch(keyword));
   }
 
   Future<void> _restoreFavorites() async {
@@ -282,7 +291,11 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
 
   void _showLocalFallback(LifeCategory category, String message) {
     setState(() {
-      _places = _applyFavoriteState(_repository.placesForCategory(category.id));
+      // 固定类别有与类别匹配的本地兜底点位；自由关键词无法生成可信的模拟结果，
+      // 因此失败时保持空列表并提供原关键词重试，避免把无关地点误导为搜索结果。
+      _places = category.isKeywordSearch
+          ? const []
+          : _applyFavoriteState(_repository.placesForCategory(category.id));
       _searchRadiusMeters = null;
       _isLoadingPlaces = false;
       _statusMessage = message;
@@ -417,11 +430,13 @@ class _CategoryHome extends StatelessWidget {
     required this.categories,
     required this.showLocationFallback,
     required this.onCategorySelected,
+    required this.onSearchSubmitted,
   });
 
   final List<LifeCategory> categories;
   final bool showLocationFallback;
   final ValueChanged<LifeCategory> onCategorySelected;
+  final ValueChanged<String> onSearchSubmitted;
 
   @override
   Widget build(BuildContext context) {
@@ -473,6 +488,8 @@ class _CategoryHome extends StatelessWidget {
                     ),
                   ],
                 ),
+                const SizedBox(height: 20),
+                NearbySearchField(onSubmitted: onSearchSubmitted),
                 const SizedBox(height: 24),
                 const Text(
                   '选择类别',
@@ -620,6 +637,7 @@ class _MapResultsScreen extends StatelessWidget {
     required this.onBack,
     required this.onRetry,
     required this.onFavoriteToggle,
+    required this.onSearchSubmitted,
   });
 
   final LifeCategory category;
@@ -633,6 +651,7 @@ class _MapResultsScreen extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onRetry;
   final ValueChanged<Place> onFavoriteToggle;
+  final ValueChanged<String> onSearchSubmitted;
 
   @override
   Widget build(BuildContext context) {
@@ -681,6 +700,16 @@ class _MapResultsScreen extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+          child: NearbySearchField(
+            initialKeyword: category.isKeywordSearch
+                ? category.amapKeyword
+                : '',
+            enabled: !isLoadingPlaces,
+            onSubmitted: onSearchSubmitted,
           ),
         ),
         Expanded(

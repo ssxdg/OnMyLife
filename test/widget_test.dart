@@ -1,6 +1,8 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:on_my_life/main.dart';
+import 'package:on_my_life/src/app/nearby_search_field.dart';
 import 'package:on_my_life/src/data/mock_life_repository.dart';
 import 'package:on_my_life/src/models/life_category.dart';
 import 'package:on_my_life/src/models/place.dart';
@@ -19,6 +21,58 @@ void main() {
     expect(location.latitude, 31.2201);
     expect(location.longitude, 121.4601);
     expect(location.accuracyMeters, 42);
+  });
+
+  testWidgets('搜索框拦截空白输入并限制关键词长度', (tester) async {
+    final submittedKeywords = <String>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: NearbySearchField(onSubmitted: submittedKeywords.add),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), '   ');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump();
+
+    expect(submittedKeywords, isEmpty);
+    expect(find.text('请输入搜索内容'), findsOneWidget);
+
+    await tester.enterText(
+      find.byType(TextField),
+      List<String>.filled(81, '景').join(),
+    );
+    final editableText = tester.widget<EditableText>(find.byType(EditableText));
+    expect(editableText.controller.text, hasLength(80));
+  });
+
+  testWidgets('搜索框清理关键词并支持一键清空', (tester) async {
+    String? submittedKeyword;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: NearbySearchField(
+            onSubmitted: (keyword) => submittedKeyword = keyword,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), '  博物馆  ');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump();
+
+    expect(submittedKeyword, '博物馆');
+
+    await tester.tap(find.byTooltip('清空搜索内容'));
+    await tester.pump();
+
+    final editableText = tester.widget<EditableText>(find.byType(EditableText));
+    expect(editableText.controller.text, isEmpty);
   });
 
   testWidgets('用户从类别进入地图并查看点位详情', (tester) async {
@@ -60,6 +114,80 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('已收藏'), findsOneWidget);
+  });
+
+  testWidgets('首页可以滚动查看新增生活分类', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+
+    await tester.pumpWidget(
+      const NearbyLifeApp(
+        locationProvider: _FakeLocationProvider(),
+        placeProvider: _FakePlaceProvider(),
+      ),
+    );
+
+    for (final categoryName in ['景点', '公园', '商场', '超市', '酒店', '公交地铁']) {
+      await tester.scrollUntilVisible(
+        find.text(categoryName),
+        240,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text(categoryName), findsOneWidget);
+    }
+  });
+
+  testWidgets('关键词搜索复用定位授权并可在地图结果页更换关键词', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final placeProvider = _KeywordPlaceProvider();
+
+    await tester.pumpWidget(
+      NearbyLifeApp(
+        locationProvider: const _FakeLocationProvider(),
+        placeProvider: placeProvider,
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), '  博物馆  ');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.text('定位授权'), findsOneWidget);
+    await tester.tap(find.text('同意并使用当前位置'));
+    await tester.pumpAndSettle();
+
+    expect(placeProvider.lastCategory?.amapKeyword, '博物馆');
+    expect(placeProvider.lastCategory?.amapTypes, isEmpty);
+    expect(placeProvider.lastCategory?.isKeywordSearch, isTrue);
+    expect(find.text('博物馆搜索结果'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), '咖啡馆');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(placeProvider.lastCategory?.amapKeyword, '咖啡馆');
+    expect(placeProvider.searchAttempts, 2);
+    expect(find.text('咖啡馆搜索结果'), findsOneWidget);
+    expect(find.text('博物馆搜索结果'), findsNothing);
+  });
+
+  testWidgets('自由关键词搜索失败时不展示固定分类模拟点位', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+
+    await tester.pumpWidget(
+      const NearbyLifeApp(
+        locationProvider: _FakeLocationProvider(),
+        placeProvider: _FailingKeywordPlaceProvider(),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), '博物馆');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.text('高德服务暂不可用：关键词搜索失败'), findsWidgets);
+    expect(find.text('小巷咖啡'), findsNothing);
+    expect(find.text('0 个地点'), findsOneWidget);
+    expect(find.text('重试'), findsOneWidget);
   });
 
   testWidgets('用户暂不授权定位时显示兜底提示', (tester) async {
@@ -301,6 +429,50 @@ class _RetryablePlaceProvider implements NearbyPlaceProvider {
       places: [PlaceFixture.realSearchRestaurant],
       radiusMeters: 1000,
     );
+  }
+}
+
+class _KeywordPlaceProvider extends _FakePlaceProvider {
+  LifeCategory? lastCategory;
+  int searchAttempts = 0;
+
+  @override
+  Future<AmapPlaceSearchResult> searchNearestPlaces({
+    required LifeCategory category,
+    required double latitude,
+    required double longitude,
+  }) async {
+    lastCategory = category;
+    searchAttempts += 1;
+
+    return AmapPlaceSearchResult(
+      places: [
+        Place(
+          id: 'keyword-${category.amapKeyword}',
+          categoryId: category.id,
+          name: '${category.amapKeyword}搜索结果',
+          address: '搜索路 1 号',
+          latitude: 31.2288,
+          longitude: 121.4786,
+          distanceMeters: 160,
+          openStatus: '高德 POI',
+        ),
+      ],
+      radiusMeters: 1000,
+    );
+  }
+}
+
+class _FailingKeywordPlaceProvider extends _FakePlaceProvider {
+  const _FailingKeywordPlaceProvider();
+
+  @override
+  Future<AmapPlaceSearchResult> searchNearestPlaces({
+    required LifeCategory category,
+    required double latitude,
+    required double longitude,
+  }) async {
+    throw const AmapServiceException('关键词搜索失败');
   }
 }
 
