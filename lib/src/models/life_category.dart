@@ -1,5 +1,11 @@
 import 'package:flutter/material.dart';
 
+/// 类别使用的地点检索策略。
+///
+/// 大多数生活服务强调“离我最近”，继续使用周边扩圈；城市景点强调城市代表性，
+/// 必须保留高德文本搜索的综合权重顺序，不能再按距离重新排序。
+enum LifeCategorySearchMode { nearby, cityRecommended }
+
 /// 生活类别模型。
 ///
 /// 这里同时保留业务 id、界面展示名称和高德查询关键词，是为了让 UI 不直接依赖地图服务字段。
@@ -18,6 +24,7 @@ class LifeCategory {
     required this.colorValue,
     required this.amapKeyword,
     this.amapTypes = const [],
+    this.searchMode = LifeCategorySearchMode.nearby,
   });
 
   /// 创建临时关键词搜索类别。
@@ -50,6 +57,9 @@ class LifeCategory {
   /// 同时传关键词和分类编码，是为了减少“类别找不到”的概率：关键词负责贴近用户表达，
   /// 分类编码负责让高德按标准 POI 类目召回结果，后续距离排序也更稳定。
   final List<String> amapTypes;
+
+  /// 当前类别应采用的检索策略，默认值保证原有十五个附近类别无需额外配置。
+  final LifeCategorySearchMode searchMode;
 
   Color get color => Color(colorValue);
 

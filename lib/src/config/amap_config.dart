@@ -50,6 +50,55 @@ class AmapConfig {
     return Uri.https('restapi.amap.com', '/v3/place/around', queryParameters);
   }
 
+  /// 构造城市限定的文本搜索地址。
+  ///
+  /// 这里不传周边搜索的距离排序参数，是为了保留高德按综合权重给出的城市推荐顺序；
+  /// `citylimit` 则避免同名景点越界召回其他城市结果。
+  Uri buildTextSearchUri({
+    required String keyword,
+    List<String> types = const [],
+    required String cityCode,
+    int page = 1,
+    int offset = 20,
+  }) {
+    final queryParameters = <String, String>{
+      'key': webServiceKey,
+      'keywords': keyword,
+      'city': cityCode,
+      'citylimit': 'true',
+      'extensions': 'all',
+      'page': page.toString(),
+      'offset': offset.toString(),
+      'output': 'json',
+    };
+    if (types.isNotEmpty) {
+      queryParameters['types'] = types.join('|');
+    }
+
+    return Uri.https('restapi.amap.com', '/v3/place/text', queryParameters);
+  }
+
+  /// 构造地点输入提示地址。
+  ///
+  /// 同时提供城市限制和当前位置偏好，可以先消除“什刹海”等具体地名的歧义；
+  /// `datatype=poi` 排除公交线路等不能直接落点的提示类型。
+  Uri buildInputTipsUri({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) {
+    return Uri.https('restapi.amap.com', '/v3/assistant/inputtips', {
+      'key': webServiceKey,
+      'keywords': keyword,
+      'city': cityCode,
+      'citylimit': 'true',
+      'location': '$longitude,$latitude',
+      'datatype': 'poi',
+      'output': 'json',
+    });
+  }
+
   Uri buildCoordinateConvertUri({
     required double latitude,
     required double longitude,

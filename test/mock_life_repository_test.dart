@@ -11,6 +11,10 @@ void main() {
     expect(repository.categoryById('hospital').amapKeyword, '医院');
     expect(repository.categoryById('toilet').amapKeyword, '公共厕所');
     expect(repository.categoryById('scenic').amapTypes, ['110200']);
+    expect(
+      repository.categoryById('scenic').searchMode,
+      LifeCategorySearchMode.cityRecommended,
+    );
     expect(repository.categoryById('park').amapTypes, ['110101']);
     expect(repository.categoryById('mall').amapTypes, ['060100']);
     expect(repository.categoryById('supermarket').amapTypes, ['060400']);
@@ -40,6 +44,7 @@ void main() {
     expect(category.amapKeyword, '博物馆');
     expect(category.amapTypes, isEmpty);
     expect(category.isKeywordSearch, isTrue);
+    expect(category.searchMode, LifeCategorySearchMode.nearby);
     expect(MockLifeRepository().categoryById('food').isKeywordSearch, isFalse);
     expect(() => LifeCategory.keywordSearch('   '), throwsArgumentError);
   });

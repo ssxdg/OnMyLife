@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
@@ -168,6 +170,210 @@ void main() {
     expect(placeProvider.searchAttempts, 2);
     expect(find.text('咖啡馆搜索结果'), findsOneWidget);
     expect(find.text('博物馆搜索结果'), findsNothing);
+  });
+
+  testWidgets('首次输入不申请定位，提交后才展示授权说明', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final locationProvider = _CountingLocationProvider();
+
+    await tester.pumpWidget(
+      NearbyLifeApp(
+        locationProvider: locationProvider,
+        placeProvider: const _FakePlaceProvider(),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), '什刹海');
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(locationProvider.requestCount, 0);
+    expect(find.text('定位授权'), findsNothing);
+
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(locationProvider.requestCount, 0);
+    expect(find.text('定位授权'), findsOneWidget);
+  });
+
+  testWidgets('具体地名优先使用城市同名结果，泛关键词继续附近搜索', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+    final placeProvider = _ExactPlaceProvider();
+
+    await tester.pumpWidget(
+      NearbyLifeApp(
+        locationProvider: const _FakeLocationProvider(),
+        placeProvider: placeProvider,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '什刹海');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.text('什刹海'), findsWidgets);
+    expect(find.text('已定位到“什刹海”'), findsOneWidget);
+    expect(placeProvider.nearbySearchCount, 0);
+
+    await tester.enterText(find.byType(TextField), '咖啡馆');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.text('附近咖啡馆'), findsOneWidget);
+    expect(placeProvider.nearbySearchCount, 1);
+  });
+
+  testWidgets('快速输入时旧候选响应不会覆盖新关键词', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+    final placeProvider = _DelayedSuggestionProvider();
+
+    await tester.pumpWidget(
+      NearbyLifeApp(
+        locationProvider: const _FakeLocationProvider(),
+        placeProvider: placeProvider,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '什刹');
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(placeProvider.pending, contains('什刹'));
+
+    await tester.enterText(find.byType(TextField), '什刹海');
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(placeProvider.pending, contains('什刹海'));
+
+    placeProvider.complete('什刹海', '什刹海');
+    await tester.pump();
+    expect(find.text('什刹海'), findsWidgets);
+
+    placeProvider.complete('什刹', '旧候选');
+    await tester.pump();
+    expect(find.text('旧候选'), findsNothing);
+    expect(find.text('什刹海'), findsWidgets);
+  });
+
+  testWidgets('选择同名候选后直接定位，返回键先收起候选层', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+    final placeProvider = _SuggestionPlaceProvider();
+
+    await tester.pumpWidget(
+      NearbyLifeApp(
+        locationProvider: const _FakeLocationProvider(),
+        placeProvider: placeProvider,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '什刹海');
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('place-suggestions')), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('place-suggestions')), findsNothing);
+    expect(find.text('附近生活'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('清空搜索内容'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), '什刹海');
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    await tester.tap(find.text('什刹海').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('已定位到“什刹海”'), findsOneWidget);
+    expect(placeProvider.citySearchCount, 0);
+    expect(placeProvider.nearbySearchCount, 0);
+  });
+
+  testWidgets('景点入口使用城市推荐查询并展示综合推荐状态', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+    final placeProvider = _ScenicPlaceProvider();
+
+    await tester.pumpWidget(
+      NearbyLifeApp(
+        locationProvider: const _FakeLocationProvider(),
+        placeProvider: placeProvider,
+      ),
+    );
+    await tester.scrollUntilVisible(
+      find.text('景点'),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(find.text('景点'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('景点'));
+    await tester.pumpAndSettle();
+
+    expect(placeProvider.requestedCityCode, '021');
+    expect(placeProvider.requestedTopLevelOnly, isTrue);
+    expect(placeProvider.requestedLimit, 10);
+    expect(find.text('城市著名景点'), findsOneWidget);
+    expect(find.text('已按上海市综合推荐展示 1 个景点'), findsOneWidget);
+  });
+
+  testWidgets('系统返回先关闭详情，再从结果页返回首页', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+
+    await tester.pumpWidget(
+      const NearbyLifeApp(
+        locationProvider: _FakeLocationProvider(),
+        placeProvider: _FakePlaceProvider(),
+      ),
+    );
+    await tester.tap(find.text('美食'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('小巷咖啡'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('去这里'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('去这里'), findsNothing);
+    expect(find.text('附近结果'), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('附近生活'), findsOneWidget);
+    expect(find.text('附近结果'), findsNothing);
+  });
+
+  testWidgets('结果面板可在百分之二十到百分之八十五之间连续拖动', (tester) async {
+    SharedPreferences.setMockInitialValues({'location_consent_accepted': true});
+
+    await tester.pumpWidget(
+      const NearbyLifeApp(
+        locationProvider: _FakeLocationProvider(),
+        placeProvider: _FakePlaceProvider(),
+      ),
+    );
+    await tester.tap(find.text('美食'));
+    await tester.pumpAndSettle();
+
+    final sheet = find.byKey(const ValueKey('results-sheet'));
+    final draggable = find.byType(DraggableScrollableSheet);
+    double sheetRatio() =>
+        tester.getSize(sheet).height / tester.getSize(draggable).height;
+
+    expect(sheetRatio(), closeTo(0.45, 0.03));
+
+    await tester.drag(
+      find.byKey(const ValueKey('results-sheet-handle')),
+      const Offset(0, -500),
+    );
+    await tester.pumpAndSettle();
+    expect(sheetRatio(), closeTo(0.85, 0.04));
+
+    await tester.drag(
+      find.byKey(const ValueKey('results-sheet-handle')),
+      const Offset(0, 700),
+    );
+    await tester.pumpAndSettle();
+    expect(sheetRatio(), closeTo(0.20, 0.04));
   });
 
   testWidgets('自由关键词搜索失败时不展示固定分类模拟点位', (tester) async {
@@ -344,6 +550,9 @@ class _FakePlaceProvider implements NearbyPlaceProvider {
     return const AmapLocationSummary(
       formattedAddress: '上海市黄浦区人民广场',
       nearbyLandmarks: ['人民广场', '上海市历史博物馆'],
+      cityName: '上海市',
+      cityCode: '021',
+      adCode: '310101',
     );
   }
 
@@ -358,6 +567,32 @@ class _FakePlaceProvider implements NearbyPlaceProvider {
       radiusMeters: 10000,
     );
   }
+
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async {
+    return AmapPlaceSearchResult(
+      places: MockLifeRepository()
+          .placesForCategory(category.id)
+          .take(limit)
+          .toList(),
+      radiusMeters: null,
+    );
+  }
+
+  @override
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) async => const [];
 }
 
 class _ReverseGeocodeFailingPlaceProvider implements NearbyPlaceProvider {
@@ -390,6 +625,24 @@ class _ReverseGeocodeFailingPlaceProvider implements NearbyPlaceProvider {
       radiusMeters: 1000,
     );
   }
+
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async => const AmapPlaceSearchResult(places: [], radiusMeters: null);
+
+  @override
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) async => const [];
 }
 
 class _RetryablePlaceProvider implements NearbyPlaceProvider {
@@ -430,6 +683,24 @@ class _RetryablePlaceProvider implements NearbyPlaceProvider {
       radiusMeters: 1000,
     );
   }
+
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async => const AmapPlaceSearchResult(places: [], radiusMeters: null);
+
+  @override
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) async => const [];
 }
 
 class _KeywordPlaceProvider extends _FakePlaceProvider {
@@ -487,4 +758,189 @@ class PlaceFixture {
     distanceMeters: 120,
     openStatus: '餐饮服务',
   );
+
+  static const shichahai = Place(
+    id: 'shichahai',
+    categoryId: LifeCategory.keywordSearchId,
+    name: '什刹海',
+    address: '北京市西城区地安门西大街49号',
+    latitude: 39.9419,
+    longitude: 116.3854,
+    distanceMeters: 3200,
+    openStatus: '风景名胜',
+  );
+}
+
+class _CountingLocationProvider implements CurrentLocationProvider {
+  int requestCount = 0;
+
+  @override
+  Future<DeviceLocation> currentLocation() async {
+    requestCount += 1;
+    return const DeviceLocation(
+      latitude: 31.2309,
+      longitude: 121.4741,
+      accuracyMeters: 18,
+    );
+  }
+}
+
+class _ExactPlaceProvider extends _FakePlaceProvider {
+  int nearbySearchCount = 0;
+
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async {
+    if (category.amapKeyword == '什刹海') {
+      return const AmapPlaceSearchResult(
+        places: [PlaceFixture.shichahai],
+        radiusMeters: null,
+      );
+    }
+    return const AmapPlaceSearchResult(places: [], radiusMeters: null);
+  }
+
+  @override
+  Future<AmapPlaceSearchResult> searchNearestPlaces({
+    required LifeCategory category,
+    required double latitude,
+    required double longitude,
+  }) async {
+    nearbySearchCount += 1;
+    return AmapPlaceSearchResult(
+      places: [
+        Place(
+          id: 'nearby-coffee',
+          categoryId: category.id,
+          name: '附近咖啡馆',
+          address: '咖啡路 1 号',
+          latitude: 31.2288,
+          longitude: 121.4786,
+          distanceMeters: 180,
+          openStatus: '营业中',
+        ),
+      ],
+      radiusMeters: 1000,
+    );
+  }
+}
+
+class _DelayedSuggestionProvider extends _FakePlaceProvider {
+  final Map<String, Completer<List<AmapPlaceSuggestion>>> pending = {};
+
+  @override
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) {
+    final completer = Completer<List<AmapPlaceSuggestion>>();
+    pending[keyword] = completer;
+    return completer.future;
+  }
+
+  void complete(String keyword, String suggestionName) {
+    pending[keyword]!.complete([
+      AmapPlaceSuggestion(
+        id: 'suggestion-$keyword',
+        name: suggestionName,
+        address: '测试地址',
+        district: '上海市黄浦区',
+        coordinate: const AmapCoordinate(
+          latitude: 31.2288,
+          longitude: 121.4786,
+        ),
+        distanceMeters: 100,
+      ),
+    ]);
+  }
+}
+
+class _SuggestionPlaceProvider extends _FakePlaceProvider {
+  int citySearchCount = 0;
+  int nearbySearchCount = 0;
+
+  @override
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) async {
+    return const [
+      AmapPlaceSuggestion(
+        id: 'shichahai',
+        name: '什刹海',
+        address: '地安门西大街49号',
+        district: '北京市西城区',
+        coordinate: AmapCoordinate(latitude: 39.9419, longitude: 116.3854),
+        distanceMeters: 3200,
+      ),
+    ];
+  }
+
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async {
+    citySearchCount += 1;
+    return const AmapPlaceSearchResult(places: [], radiusMeters: null);
+  }
+
+  @override
+  Future<AmapPlaceSearchResult> searchNearestPlaces({
+    required LifeCategory category,
+    required double latitude,
+    required double longitude,
+  }) async {
+    nearbySearchCount += 1;
+    return const AmapPlaceSearchResult(places: [], radiusMeters: 1000);
+  }
+}
+
+class _ScenicPlaceProvider extends _FakePlaceProvider {
+  String? requestedCityCode;
+  bool? requestedTopLevelOnly;
+  int? requestedLimit;
+
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async {
+    requestedCityCode = cityCode;
+    requestedTopLevelOnly = topLevelScenicOnly;
+    requestedLimit = limit;
+    return const AmapPlaceSearchResult(
+      places: [
+        Place(
+          id: 'city-scenic',
+          categoryId: 'scenic',
+          name: '城市著名景点',
+          address: '城市中心',
+          latitude: 31.2288,
+          longitude: 121.4786,
+          distanceMeters: 1200,
+          openStatus: '风景名胜',
+        ),
+      ],
+      radiusMeters: null,
+    );
+  }
 }

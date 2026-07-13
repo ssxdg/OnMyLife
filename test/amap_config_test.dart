@@ -48,6 +48,50 @@ void main() {
     expect(uri.queryParameters['output'], 'json');
   });
 
+  test('城市景点查询启用城市限制并保留高德综合排序', () {
+    const config = AmapConfig(
+      webKey: 'web-key',
+      webSecurityCode: 'web-security-code',
+      webServiceKey: 'web-service-key',
+    );
+
+    final uri = config.buildTextSearchUri(
+      keyword: '景点',
+      types: const ['110200'],
+      cityCode: '010',
+      offset: 10,
+    );
+
+    expect(uri.path, '/v3/place/text');
+    expect(uri.queryParameters['city'], '010');
+    expect(uri.queryParameters['citylimit'], 'true');
+    expect(uri.queryParameters['types'], '110200');
+    expect(uri.queryParameters['offset'], '10');
+    expect(uri.queryParameters.containsKey('sortrule'), isFalse);
+  });
+
+  test('输入提示查询携带城市、位置偏好和 POI 限制', () {
+    const config = AmapConfig(
+      webKey: 'web-key',
+      webSecurityCode: 'web-security-code',
+      webServiceKey: 'web-service-key',
+    );
+
+    final uri = config.buildInputTipsUri(
+      keyword: '什刹海',
+      cityCode: '010',
+      latitude: 39.9042,
+      longitude: 116.4074,
+    );
+
+    expect(uri.path, '/v3/assistant/inputtips');
+    expect(uri.queryParameters['keywords'], '什刹海');
+    expect(uri.queryParameters['city'], '010');
+    expect(uri.queryParameters['citylimit'], 'true');
+    expect(uri.queryParameters['location'], '116.4074,39.9042');
+    expect(uri.queryParameters['datatype'], 'poi');
+  });
+
   test('高德周边搜索首轮无结果时继续扩大半径并返回最近点位', () async {
     const config = AmapConfig(
       webKey: 'web-key',
@@ -174,7 +218,13 @@ void main() {
         {
           "status": "1",
           "regeocode": {
-            "formatted_address": "上海市黄浦区人民广场",
+            "formatted_address": "北京市东城区天安门广场",
+            "addressComponent": {
+              "province": "北京市",
+              "city": [],
+              "citycode": "010",
+              "adcode": "110101"
+            },
             "pois": [
               {"name": "人民广场"},
               {"name": "上海市历史博物馆"}
@@ -190,9 +240,117 @@ void main() {
       longitude: 121.4785,
     );
 
-    expect(summary.formattedAddress, '上海市黄浦区人民广场');
+    expect(summary.formattedAddress, '北京市东城区天安门广场');
+    expect(summary.cityName, '北京市');
+    expect(summary.cityCode, '010');
+    expect(summary.adCode, '110101');
     expect(summary.nearbyLandmarks, ['人民广场', '上海市历史博物馆']);
   });
+
+  test('城市景点过滤内部点位和纯公园，去重后保持推荐顺序并限制十条', () async {
+    const config = AmapConfig(
+      webKey: 'web-key',
+      webSecurityCode: 'web-security-code',
+      webServiceKey: 'web-service-key',
+    );
+    final pois = <Map<String, String>>[
+      _poi('forbidden-city', '故宫博物院', '110200', ''),
+      _poi('inner-gate', '故宫午门', '110200', 'forbidden-city'),
+      _poi('park', '普通公园', '110101', ''),
+      _poi('duplicate-id', '颐和园', '110202', ''),
+      _poi('duplicate-id', '颐和园西门', '110202', ''),
+      ...List.generate(
+        12,
+        (index) => _poi('scenic-$index', '推荐景点$index', '110200', ''),
+      ),
+    ];
+    final client = MockClient((request) async {
+      expect(request.url.path, '/v3/place/text');
+      expect(request.url.queryParameters['city'], '010');
+      return _jsonResponse(jsonEncode({'status': '1', 'pois': pois}));
+    });
+    final service = AmapPlaceService(config: config, client: client);
+
+    final result = await service.searchCityPlaces(
+      category: MockLifeRepository().categoryById('scenic'),
+      cityCode: '010',
+      latitude: 39.9042,
+      longitude: 116.4074,
+      topLevelScenicOnly: true,
+      limit: 10,
+    );
+
+    expect(result.radiusMeters, isNull);
+    expect(result.places, hasLength(10));
+    expect(
+      result.places.take(3).map((place) => place.name),
+      orderedEquals(['故宫博物院', '颐和园', '推荐景点0']),
+    );
+    expect(result.places.map((place) => place.name), isNot(contains('故宫午门')));
+    expect(result.places.map((place) => place.name), isNot(contains('普通公园')));
+  });
+
+  test('地点候选只保留有效 POI 并返回最多八条', () async {
+    const config = AmapConfig(
+      webKey: 'web-key',
+      webSecurityCode: 'web-security-code',
+      webServiceKey: 'web-service-key',
+    );
+    final tips = <Map<String, Object?>>[
+      {
+        'id': 'shichahai',
+        'name': '什刹海',
+        'district': '北京市西城区',
+        'address': '地安门西大街49号',
+        'location': '116.3854,39.9419',
+      },
+      {'id': '', 'name': '无坐标提示', 'location': []},
+      ...List.generate(
+        10,
+        (index) => {
+          'id': 'tip-$index',
+          'name': '什刹海候选$index',
+          'district': '北京市西城区',
+          'address': '候选路$index号',
+          'location': '116.38$index,39.94$index',
+        },
+      ),
+    ];
+    final client = MockClient(
+      (request) async =>
+          _jsonResponse(jsonEncode({'status': '1', 'tips': tips})),
+    );
+    final service = AmapPlaceService(config: config, client: client);
+
+    final suggestions = await service.searchPlaceSuggestions(
+      keyword: '什刹海',
+      cityCode: '010',
+      latitude: 39.9042,
+      longitude: 116.4074,
+    );
+
+    expect(suggestions, hasLength(8));
+    expect(suggestions.first.name, '什刹海');
+    expect(suggestions.first.district, '北京市西城区');
+    expect(suggestions.first.distanceMeters, greaterThan(0));
+  });
+}
+
+Map<String, String> _poi(
+  String id,
+  String name,
+  String typeCode,
+  String parent,
+) {
+  return {
+    'id': id,
+    'name': name,
+    'type': '风景名胜',
+    'typecode': typeCode,
+    'parent': parent,
+    'address': '北京市测试地址',
+    'location': '116.3970,39.9080',
+  };
 }
 
 http.Response _jsonResponse(String body) {

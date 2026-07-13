@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/app_colors.dart';
+import '../services/amap_place_service.dart';
 
 /// 附近地点关键词搜索框。
 ///
@@ -13,11 +14,19 @@ class NearbySearchField extends StatefulWidget {
     required this.onSubmitted,
     this.initialKeyword = '',
     this.enabled = true,
+    this.suggestions = const [],
+    this.isLoadingSuggestions = false,
+    this.onChanged,
+    this.onSuggestionSelected,
   });
 
   final ValueChanged<String> onSubmitted;
   final String initialKeyword;
   final bool enabled;
+  final List<AmapPlaceSuggestion> suggestions;
+  final bool isLoadingSuggestions;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<AmapPlaceSuggestion>? onSuggestionSelected;
 
   @override
   State<NearbySearchField> createState() => _NearbySearchFieldState();
@@ -61,68 +70,146 @@ class _NearbySearchFieldState extends State<NearbySearchField> {
   Widget build(BuildContext context) {
     final hasText = _controller.text.isNotEmpty;
 
-    return TextField(
-      controller: _controller,
-      enabled: widget.enabled,
-      maxLines: 1,
-      textInputAction: TextInputAction.search,
-      inputFormatters: [
-        LengthLimitingTextInputFormatter(_maximumKeywordLength),
-      ],
-      onChanged: (value) {
-        setState(() {
-          if (value.trim().isNotEmpty) {
-            _errorText = null;
-          }
-        });
-      },
-      onSubmitted: (_) => _submit(),
-      decoration: InputDecoration(
-        hintText: '搜索附近地点，如景点、咖啡馆',
-        errorText: _errorText,
-        prefixIcon: const Icon(Icons.search_rounded, color: AppColors.mint),
-        suffixIcon: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (hasText)
-              IconButton(
-                onPressed: widget.enabled ? _clear : null,
-                tooltip: '清空搜索内容',
-                icon: const Icon(Icons.close_rounded),
-              ),
-            IconButton(
-              onPressed: widget.enabled ? _submit : null,
-              tooltip: '搜索附近地点',
-              icon: const Icon(Icons.arrow_forward_rounded),
-            ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TextField(
+          controller: _controller,
+          enabled: widget.enabled,
+          maxLines: 1,
+          textInputAction: TextInputAction.search,
+          inputFormatters: [
+            LengthLimitingTextInputFormatter(_maximumKeywordLength),
           ],
+          onChanged: (value) {
+            setState(() {
+              if (value.trim().isNotEmpty) {
+                _errorText = null;
+              }
+            });
+            widget.onChanged?.call(value);
+          },
+          onSubmitted: (_) => _submit(),
+          decoration: InputDecoration(
+            hintText: '搜索附近地点，如景点、咖啡馆',
+            errorText: _errorText,
+            prefixIcon: const Icon(Icons.search_rounded, color: AppColors.mint),
+            suffixIcon: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (hasText)
+                  IconButton(
+                    onPressed: widget.enabled ? _clear : null,
+                    tooltip: '清空搜索内容',
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                IconButton(
+                  onPressed: widget.enabled ? _submit : null,
+                  tooltip: '搜索附近地点',
+                  icon: const Icon(Icons.arrow_forward_rounded),
+                ),
+              ],
+            ),
+            suffixIconConstraints: const BoxConstraints(minWidth: 48),
+            filled: true,
+            fillColor: AppColors.surface,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 14,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: AppColors.line),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: AppColors.line),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: AppColors.mint, width: 1.5),
+            ),
+          ),
         ),
-        suffixIconConstraints: const BoxConstraints(minWidth: 48),
-        filled: true,
-        fillColor: AppColors.surface,
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 14,
-          vertical: 14,
-        ),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppColors.line),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppColors.line),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppColors.mint, width: 1.5),
-        ),
-      ),
+        if (widget.isLoadingSuggestions || widget.suggestions.isNotEmpty)
+          Container(
+            key: const ValueKey('place-suggestions'),
+            constraints: const BoxConstraints(maxHeight: 248),
+            margin: const EdgeInsets.only(top: 6),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppColors.line),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x181F2933),
+                  blurRadius: 16,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: widget.isLoadingSuggestions && widget.suggestions.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 12),
+                        Text('正在查找地点候选'),
+                      ],
+                    ),
+                  )
+                : ListView.separated(
+                    shrinkWrap: true,
+                    padding: EdgeInsets.zero,
+                    itemCount: widget.suggestions.length,
+                    separatorBuilder: (context, index) =>
+                        const Divider(height: 1, color: AppColors.line),
+                    itemBuilder: (context, index) {
+                      final suggestion = widget.suggestions[index];
+                      final detail = [
+                        suggestion.district,
+                        suggestion.address,
+                      ].where((text) => text.isNotEmpty).join(' · ');
+                      return Material(
+                        color: Colors.transparent,
+                        child: ListTile(
+                          dense: true,
+                          leading: const Icon(
+                            Icons.place_outlined,
+                            color: AppColors.mint,
+                          ),
+                          title: Text(
+                            suggestion.name,
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                          subtitle: detail.isEmpty
+                              ? null
+                              : Text(
+                                  detail,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                          onTap: widget.onSuggestionSelected == null
+                              ? null
+                              : () => widget.onSuggestionSelected!(suggestion),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+      ],
     );
   }
 
   void _clear() {
     _controller.clear();
     setState(() => _errorText = null);
+    widget.onChanged?.call('');
   }
 
   void _submit() {

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 
@@ -25,10 +26,53 @@ class AmapLocationSummary {
   const AmapLocationSummary({
     required this.formattedAddress,
     required this.nearbyLandmarks,
+    this.cityName = '',
+    this.cityCode = '',
+    this.adCode = '',
   });
 
   final String formattedAddress;
   final List<String> nearbyLandmarks;
+  final String cityName;
+  final String cityCode;
+  final String adCode;
+}
+
+/// 输入提示返回的可选地点。
+///
+/// 候选模型保留行政区和地址供用户辨认，同时携带坐标和 POI 标识，选择后可以直接落点，
+/// 避免再次把一个明确地点交给模糊的周边搜索接口。
+class AmapPlaceSuggestion {
+  const AmapPlaceSuggestion({
+    required this.id,
+    required this.name,
+    required this.address,
+    required this.district,
+    required this.coordinate,
+    required this.distanceMeters,
+  });
+
+  final String id;
+  final String name;
+  final String address;
+  final String district;
+  final AmapCoordinate coordinate;
+  final int distanceMeters;
+
+  Place toPlace(String categoryId) {
+    return Place(
+      id: id,
+      categoryId: categoryId,
+      name: name,
+      address: address.isNotEmpty
+          ? address
+          : (district.isNotEmpty ? district : '地址待确认'),
+      latitude: coordinate.latitude,
+      longitude: coordinate.longitude,
+      distanceMeters: distanceMeters,
+      openStatus: '高德地点',
+    );
+  }
 }
 
 /// 周边搜索结果。
@@ -42,7 +86,9 @@ class AmapPlaceSearchResult {
   });
 
   final List<Place> places;
-  final int radiusMeters;
+
+  /// 城市文本检索没有搜索半径，因此使用可空值避免界面伪造一个范围。
+  final int? radiusMeters;
 }
 
 /// 高德 WebService 调用异常。
@@ -75,6 +121,22 @@ abstract class NearbyPlaceProvider {
 
   Future<AmapPlaceSearchResult> searchNearestPlaces({
     required LifeCategory category,
+    required double latitude,
+    required double longitude,
+  });
+
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  });
+
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
     required double latitude,
     required double longitude,
   });
@@ -137,6 +199,12 @@ class AmapPlaceService implements NearbyPlaceProvider {
     }
 
     final pois = regeocode['pois'];
+    final addressComponent = regeocode['addressComponent'];
+    final component = addressComponent is Map<String, dynamic>
+        ? addressComponent
+        : const <String, dynamic>{};
+    final rawCity = _stringValue(component['city']);
+    final province = _stringValue(component['province']);
     final landmarks = pois is List
         ? pois
               .map((poi) => poi is Map<String, dynamic> ? poi['name'] : null)
@@ -151,6 +219,10 @@ class AmapPlaceService implements NearbyPlaceProvider {
           ? '当前位置'
           : _stringValue(regeocode['formatted_address']),
       nearbyLandmarks: landmarks,
+      // 直辖市的 city 字段可能返回空数组，此时使用省级名称才能继续城市限定搜索。
+      cityName: rawCity.isEmpty ? province : rawCity,
+      cityCode: _stringValue(component['citycode']),
+      adCode: _stringValue(component['adcode']),
     );
   }
 
@@ -186,6 +258,91 @@ class AmapPlaceService implements NearbyPlaceProvider {
     );
   }
 
+  @override
+  Future<AmapPlaceSearchResult> searchCityPlaces({
+    required LifeCategory category,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+    bool topLevelScenicOnly = false,
+    int limit = 20,
+  }) async {
+    final data = await _getJson(
+      config.buildTextSearchUri(
+        keyword: category.amapKeyword,
+        types: category.amapTypes,
+        cityCode: cityCode,
+        // 景点过滤会丢弃内部点位，因此多取一些原始结果再截取推荐前十。
+        // v3 文本搜索单页最多取 25 条，避免传入超限参数导致服务端拒绝请求。
+        offset: topLevelScenicOnly ? 25 : math.min(limit, 25),
+      ),
+    );
+    final places = _parsePlaces(
+      data,
+      category.id,
+      originLatitude: latitude,
+      originLongitude: longitude,
+      topLevelScenicOnly: topLevelScenicOnly,
+    );
+
+    // 不排序是有意设计：城市推荐必须保留高德综合权重，而距离仅供列表展示。
+    return AmapPlaceSearchResult(
+      places: places.take(limit).toList(),
+      radiusMeters: null,
+    );
+  }
+
+  @override
+  Future<List<AmapPlaceSuggestion>> searchPlaceSuggestions({
+    required String keyword,
+    required String cityCode,
+    required double latitude,
+    required double longitude,
+  }) async {
+    final data = await _getJson(
+      config.buildInputTipsUri(
+        keyword: keyword,
+        cityCode: cityCode,
+        latitude: latitude,
+        longitude: longitude,
+      ),
+    );
+    final tips = data['tips'];
+    if (tips is! List) {
+      return const [];
+    }
+
+    return tips
+        .map((tip) {
+          if (tip is! Map<String, dynamic>) {
+            return null;
+          }
+          final id = _stringValue(tip['id']);
+          final name = _stringValue(tip['name']);
+          final coordinate = _parseCoordinate(_stringValue(tip['location']));
+          if (id.isEmpty || name.isEmpty || coordinate == null) {
+            return null;
+          }
+
+          return AmapPlaceSuggestion(
+            id: id,
+            name: name,
+            address: _stringValue(tip['address']),
+            district: _stringValue(tip['district']),
+            coordinate: coordinate,
+            distanceMeters: _distanceMeters(
+              latitude,
+              longitude,
+              coordinate.latitude,
+              coordinate.longitude,
+            ),
+          );
+        })
+        .whereType<AmapPlaceSuggestion>()
+        .take(8)
+        .toList();
+  }
+
   void dispose() {
     _client.close();
   }
@@ -217,22 +374,50 @@ class AmapPlaceService implements NearbyPlaceProvider {
     return decoded;
   }
 
-  List<Place> _parsePlaces(Map<String, dynamic> data, String categoryId) {
+  List<Place> _parsePlaces(
+    Map<String, dynamic> data,
+    String categoryId, {
+    double? originLatitude,
+    double? originLongitude,
+    bool topLevelScenicOnly = false,
+  }) {
     final pois = data['pois'];
     if (pois is! List) {
       return const [];
     }
 
-    return pois
-        .map(
-          (poi) =>
-              poi is Map<String, dynamic> ? _parsePlace(poi, categoryId) : null,
-        )
-        .whereType<Place>()
-        .toList();
+    final seenIds = <String>{};
+    final seenNames = <String>{};
+    final places = <Place>[];
+    for (final rawPoi in pois) {
+      if (rawPoi is! Map<String, dynamic>) {
+        continue;
+      }
+      if (topLevelScenicOnly && !_isTopLevelScenic(rawPoi)) {
+        continue;
+      }
+      final place = _parsePlace(
+        rawPoi,
+        categoryId,
+        originLatitude: originLatitude,
+        originLongitude: originLongitude,
+      );
+      if (place == null ||
+          !seenIds.add(place.id) ||
+          !seenNames.add(place.name.trim().toLowerCase())) {
+        continue;
+      }
+      places.add(place);
+    }
+    return places;
   }
 
-  Place? _parsePlace(Map<String, dynamic> poi, String categoryId) {
+  Place? _parsePlace(
+    Map<String, dynamic> poi,
+    String categoryId, {
+    double? originLatitude,
+    double? originLongitude,
+  }) {
     final coordinate = _parseCoordinate(_stringValue(poi['location']));
     if (coordinate == null) {
       return null;
@@ -257,11 +442,55 @@ class AmapPlaceService implements NearbyPlaceProvider {
           : _stringValue(poi['address']),
       latitude: coordinate.latitude,
       longitude: coordinate.longitude,
-      distanceMeters: int.tryParse(_stringValue(poi['distance'])) ?? 0,
+      distanceMeters:
+          int.tryParse(_stringValue(poi['distance'])) ??
+          (originLatitude == null || originLongitude == null
+              ? 0
+              : _distanceMeters(
+                  originLatitude,
+                  originLongitude,
+                  coordinate.latitude,
+                  coordinate.longitude,
+                )),
       openStatus: type.isEmpty ? '高德 POI' : type,
       phone: _nullableString(poi['tel']),
     );
   }
+
+  bool _isTopLevelScenic(Map<String, dynamic> poi) {
+    if (_stringValue(poi['parent']).isNotEmpty) {
+      return false;
+    }
+
+    // 高德可能用竖线返回多个分类编码；只接受至少一个 1102xx 风景名胜编码，
+    // 明确排除 110101 公园等容易混入“景点”入口的普通公共空间。
+    return _stringValue(
+      poi['typecode'],
+    ).split('|').any((code) => code.startsWith('1102'));
+  }
+
+  int _distanceMeters(
+    double fromLatitude,
+    double fromLongitude,
+    double toLatitude,
+    double toLongitude,
+  ) {
+    const earthRadiusMeters = 6371000.0;
+    final latitudeDelta = _toRadians(toLatitude - fromLatitude);
+    final longitudeDelta = _toRadians(toLongitude - fromLongitude);
+    final startLatitude = _toRadians(fromLatitude);
+    final endLatitude = _toRadians(toLatitude);
+    final a =
+        math.sin(latitudeDelta / 2) * math.sin(latitudeDelta / 2) +
+        math.cos(startLatitude) *
+            math.cos(endLatitude) *
+            math.sin(longitudeDelta / 2) *
+            math.sin(longitudeDelta / 2);
+    return (earthRadiusMeters * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+        .round();
+  }
+
+  double _toRadians(double degrees) => degrees * math.pi / 180;
 
   AmapCoordinate? _parseCoordinate(String rawLocation) {
     final parts = rawLocation.split(',');

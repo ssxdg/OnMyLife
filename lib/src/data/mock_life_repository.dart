@@ -106,6 +106,7 @@ class MockLifeRepository {
       colorValue: 0xFF2A9D8F,
       amapKeyword: '景点',
       amapTypes: ['110200'],
+      searchMode: LifeCategorySearchMode.cityRecommended,
     ),
     LifeCategory(
       id: 'park',

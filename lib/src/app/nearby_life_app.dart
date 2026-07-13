@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -75,6 +77,10 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
   bool _hasLocationConsent = false;
   bool _locationDenied = false;
   bool _isLoadingPlaces = false;
+  List<AmapPlaceSuggestion> _placeSuggestions = const [];
+  bool _isLoadingSuggestions = false;
+  Timer? _suggestionDebounce;
+  int _suggestionRequestSequence = 0;
 
   @override
   void initState() {
@@ -88,6 +94,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
 
   @override
   void dispose() {
+    _suggestionDebounce?.cancel();
     final provider = _placeProvider;
     if (provider is AmapPlaceService) {
       provider.dispose();
@@ -99,29 +106,55 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
   Widget build(BuildContext context) {
     final selectedCategory = _selectedCategory;
 
-    return Scaffold(
-      body: SafeArea(
-        child: selectedCategory == null
-            ? _CategoryHome(
-                categories: _repository.categories,
-                showLocationFallback: _locationDenied,
-                onCategorySelected: _handleCategorySelected,
-                onSearchSubmitted: _handleKeywordSearch,
-              )
-            : _MapResultsScreen(
-                category: selectedCategory,
-                places: _places,
-                currentCoordinate: _currentCoordinate,
-                locationSummary: _locationSummary,
-                deviceLocation: _deviceLocation,
-                searchRadiusMeters: _searchRadiusMeters,
-                statusMessage: _statusMessage,
-                isLoadingPlaces: _isLoadingPlaces,
-                onBack: _handleBack,
-                onRetry: _retrySelectedCategory,
-                onFavoriteToggle: _toggleFavorite,
-                onSearchSubmitted: _handleKeywordSearch,
-              ),
+    final hasSuggestionLayer =
+        _isLoadingSuggestions || _placeSuggestions.isNotEmpty;
+
+    return PopScope<Object?>(
+      // 结果页和候选层属于根页面内部状态，必须先由应用消费返回操作；只有首页无浮层时
+      // 才允许系统弹出根路由并退出应用。
+      canPop: selectedCategory == null && !hasSuggestionLayer,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          return;
+        }
+        if (hasSuggestionLayer) {
+          _clearSuggestions();
+          return;
+        }
+        _handleBack();
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: selectedCategory == null
+              ? _CategoryHome(
+                  categories: _repository.categories,
+                  showLocationFallback: _locationDenied,
+                  suggestions: _placeSuggestions,
+                  isLoadingSuggestions: _isLoadingSuggestions,
+                  onCategorySelected: _handleCategorySelected,
+                  onSearchChanged: _handleSearchChanged,
+                  onSuggestionSelected: _handleSuggestionSelected,
+                  onSearchSubmitted: _handleKeywordSearch,
+                )
+              : _MapResultsScreen(
+                  category: selectedCategory,
+                  places: _places,
+                  currentCoordinate: _currentCoordinate,
+                  locationSummary: _locationSummary,
+                  deviceLocation: _deviceLocation,
+                  searchRadiusMeters: _searchRadiusMeters,
+                  statusMessage: _statusMessage,
+                  isLoadingPlaces: _isLoadingPlaces,
+                  suggestions: _placeSuggestions,
+                  isLoadingSuggestions: _isLoadingSuggestions,
+                  onBack: _handleBack,
+                  onRetry: _retrySelectedCategory,
+                  onFavoriteToggle: _toggleFavorite,
+                  onSearchChanged: _handleSearchChanged,
+                  onSuggestionSelected: _handleSuggestionSelected,
+                  onSearchSubmitted: _handleKeywordSearch,
+                ),
+        ),
       ),
     );
   }
@@ -136,9 +169,108 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
   }
 
   void _handleKeywordSearch(String keyword) {
-    // 关键词被包装为临时类别后，可以完整复用定位授权、坐标转换、扩圈查询、
-    // 地图展示和重试链路，不需要再维护一套并行的搜索页面状态。
-    _handleCategorySelected(LifeCategory.keywordSearch(keyword));
+    final normalizedKeyword = keyword.trim();
+    final exactSuggestion = _placeSuggestions
+        .where(
+          (suggestion) =>
+              _normalizePlaceName(suggestion.name) ==
+              _normalizePlaceName(normalizedKeyword),
+        )
+        .firstOrNull;
+    _clearSuggestions();
+    final category = LifeCategory.keywordSearch(normalizedKeyword);
+    if (_hasLocationConsent) {
+      _loadCategory(category, exactSuggestion: exactSuggestion);
+      return;
+    }
+
+    // 首次输入只保留文本，直到用户明确提交才展示应用内定位说明并请求系统定位。
+    _showLocationConsent(category);
+  }
+
+  void _handleSearchChanged(String value) {
+    final keyword = value.trim();
+    _suggestionDebounce?.cancel();
+    final requestSequence = ++_suggestionRequestSequence;
+    if (keyword.length < 2 || !_hasLocationConsent) {
+      if (_placeSuggestions.isNotEmpty || _isLoadingSuggestions) {
+        setState(() {
+          _placeSuggestions = const [];
+          _isLoadingSuggestions = false;
+        });
+      }
+      return;
+    }
+
+    // 300 毫秒防抖减少连续输入产生的无效请求；请求序号在响应落地前再次校验，
+    // 防止慢速旧请求覆盖用户刚输入的新关键词。
+    _suggestionDebounce = Timer(
+      const Duration(milliseconds: 300),
+      () => _loadSuggestions(keyword, requestSequence),
+    );
+  }
+
+  Future<void> _loadSuggestions(String keyword, int requestSequence) async {
+    if (mounted && requestSequence == _suggestionRequestSequence) {
+      setState(() => _isLoadingSuggestions = true);
+    }
+
+    try {
+      final context = await _ensureLocationContext(showProgress: false);
+      if (!mounted || requestSequence != _suggestionRequestSequence) {
+        return;
+      }
+      if (context.summary.cityCode.isEmpty) {
+        setState(() {
+          _placeSuggestions = const [];
+          _isLoadingSuggestions = false;
+        });
+        return;
+      }
+
+      final suggestions = await _placeProvider.searchPlaceSuggestions(
+        keyword: keyword,
+        cityCode: context.summary.cityCode,
+        latitude: context.coordinate.latitude,
+        longitude: context.coordinate.longitude,
+      );
+      if (!mounted || requestSequence != _suggestionRequestSequence) {
+        return;
+      }
+      setState(() {
+        _placeSuggestions = suggestions;
+        _isLoadingSuggestions = false;
+      });
+    } catch (_) {
+      if (!mounted || requestSequence != _suggestionRequestSequence) {
+        return;
+      }
+      // 候选提示是增强能力，失败时静默收起；用户提交后仍会执行城市文本精确匹配。
+      setState(() {
+        _placeSuggestions = const [];
+        _isLoadingSuggestions = false;
+      });
+    }
+  }
+
+  void _handleSuggestionSelected(AmapPlaceSuggestion suggestion) {
+    _clearSuggestions();
+    _loadCategory(
+      LifeCategory.keywordSearch(suggestion.name),
+      exactSuggestion: suggestion,
+    );
+  }
+
+  void _clearSuggestions() {
+    _suggestionDebounce?.cancel();
+    _suggestionRequestSequence += 1;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _placeSuggestions = const [];
+      _isLoadingSuggestions = false;
+    });
   }
 
   Future<void> _restoreFavorites() async {
@@ -158,6 +290,7 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
   }
 
   void _handleBack() {
+    _clearSuggestions();
     setState(() {
       _selectedCategory = null;
       _places = const [];
@@ -167,65 +300,40 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
     });
   }
 
-  Future<void> _loadCategory(LifeCategory category) async {
+  Future<void> _loadCategory(
+    LifeCategory category, {
+    AmapPlaceSuggestion? exactSuggestion,
+  }) async {
+    _suggestionDebounce?.cancel();
+    _suggestionRequestSequence += 1;
     setState(() {
       _selectedCategory = category;
       _places = const [];
-      _locationSummary = null;
-      _currentCoordinate = null;
-      _deviceLocation = null;
+      _placeSuggestions = const [];
+      _isLoadingSuggestions = false;
       _searchRadiusMeters = null;
       _isLoadingPlaces = true;
-      _statusMessage = '正在获取手机当前位置';
+      _statusMessage = _currentCoordinate == null
+          ? '正在获取手机当前位置'
+          : '正在查找${category.name}';
     });
 
     try {
-      final deviceLocation = await _locationProvider.currentLocation();
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _deviceLocation = deviceLocation;
-        _statusMessage = '正在校准高德地图坐标';
-      });
-
-      final coordinate = await _resolveAmapCoordinate(deviceLocation);
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _currentCoordinate = coordinate;
-        _statusMessage = '正在读取当前位置详情';
-      });
-
-      final locationSummary = await _resolveLocationSummary(coordinate);
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _locationSummary = locationSummary;
-        _statusMessage = '正在查找最近的${category.name}';
-      });
-
-      final result = await _placeProvider.searchNearestPlaces(
-        category: category,
-        latitude: coordinate.latitude,
-        longitude: coordinate.longitude,
+      final locationContext = await _ensureLocationContext(showProgress: true);
+      final outcome = await _searchPlaces(
+        category,
+        locationContext,
+        exactSuggestion: exactSuggestion,
       );
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _places = _applyFavoriteState(result.places);
-        _searchRadiusMeters = result.radiusMeters;
+        _places = _applyFavoriteState(outcome.result.places);
+        _searchRadiusMeters = outcome.result.radiusMeters;
         _isLoadingPlaces = false;
-        _statusMessage = result.places.isEmpty
-            ? '已扩大到 ${_formatDistance(result.radiusMeters)}，仍未找到${category.name}'
-            : '已按距离返回最近结果，搜索到 ${_formatDistance(result.radiusMeters)}';
+        _statusMessage = outcome.statusMessage;
       });
     } on LocationAccessException catch (error) {
       if (!mounted) {
@@ -252,6 +360,135 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
 
       _showLocalFallback(category, '定位或搜索失败，已显示本地占位数据');
     }
+  }
+
+  Future<_LocationContext> _ensureLocationContext({
+    required bool showProgress,
+  }) async {
+    final cachedDeviceLocation = _deviceLocation;
+    final cachedCoordinate = _currentCoordinate;
+    final cachedSummary = _locationSummary;
+    if (cachedDeviceLocation != null &&
+        cachedCoordinate != null &&
+        cachedSummary != null) {
+      return _LocationContext(
+        deviceLocation: cachedDeviceLocation,
+        coordinate: cachedCoordinate,
+        summary: cachedSummary,
+      );
+    }
+
+    final deviceLocation = await _locationProvider.currentLocation();
+    if (mounted) {
+      setState(() {
+        _deviceLocation = deviceLocation;
+        if (showProgress) {
+          _statusMessage = '正在校准高德地图坐标';
+        }
+      });
+    }
+    final coordinate = await _resolveAmapCoordinate(deviceLocation);
+    if (mounted) {
+      setState(() {
+        _currentCoordinate = coordinate;
+        if (showProgress) {
+          _statusMessage = '正在读取当前位置详情';
+        }
+      });
+    }
+    final summary = await _resolveLocationSummary(coordinate);
+    if (mounted) {
+      setState(() {
+        _locationSummary = summary;
+        if (showProgress) {
+          _statusMessage = '正在搜索地点';
+        }
+      });
+    }
+    return _LocationContext(
+      deviceLocation: deviceLocation,
+      coordinate: coordinate,
+      summary: summary,
+    );
+  }
+
+  Future<_SearchOutcome> _searchPlaces(
+    LifeCategory category,
+    _LocationContext context, {
+    AmapPlaceSuggestion? exactSuggestion,
+  }) async {
+    if (exactSuggestion != null) {
+      return _SearchOutcome(
+        result: AmapPlaceSearchResult(
+          places: [exactSuggestion.toPlace(category.id)],
+          radiusMeters: null,
+        ),
+        statusMessage: '已定位到“${exactSuggestion.name}”',
+      );
+    }
+
+    if (category.searchMode == LifeCategorySearchMode.cityRecommended &&
+        context.summary.cityCode.isNotEmpty) {
+      final result = await _placeProvider.searchCityPlaces(
+        category: category,
+        cityCode: context.summary.cityCode,
+        latitude: context.coordinate.latitude,
+        longitude: context.coordinate.longitude,
+        topLevelScenicOnly: true,
+        limit: 10,
+      );
+      return _SearchOutcome(
+        result: result,
+        statusMessage: result.places.isEmpty
+            ? '${context.summary.cityName}暂未找到推荐${category.name}'
+            : '已按${context.summary.cityName}综合推荐展示 ${result.places.length} 个景点',
+      );
+    }
+
+    if (category.isKeywordSearch && context.summary.cityCode.isNotEmpty) {
+      try {
+        final cityResult = await _placeProvider.searchCityPlaces(
+          category: category,
+          cityCode: context.summary.cityCode,
+          latitude: context.coordinate.latitude,
+          longitude: context.coordinate.longitude,
+        );
+        final exactPlace = cityResult.places
+            .where(
+              (place) =>
+                  _normalizePlaceName(place.name) ==
+                  _normalizePlaceName(category.amapKeyword),
+            )
+            .firstOrNull;
+        if (exactPlace != null) {
+          return _SearchOutcome(
+            result: AmapPlaceSearchResult(
+              places: [exactPlace],
+              radiusMeters: null,
+            ),
+            statusMessage: '已定位到“${exactPlace.name}”',
+          );
+        }
+      } on AmapServiceException {
+        // 城市文本搜索失败不终止流程；继续执行原有周边扩圈，保证泛关键词仍可用。
+      }
+    }
+
+    final result = await _placeProvider.searchNearestPlaces(
+      category: category,
+      latitude: context.coordinate.latitude,
+      longitude: context.coordinate.longitude,
+    );
+    final missingCity =
+        category.searchMode == LifeCategorySearchMode.cityRecommended &&
+        context.summary.cityCode.isEmpty;
+    return _SearchOutcome(
+      result: result,
+      statusMessage: result.places.isEmpty
+          ? '已扩大到 ${_formatDistance(result.radiusMeters!)}，仍未找到${category.name}'
+          : '${missingCity ? '无法识别当前城市，已回退附近搜索；' : ''}'
+                '已按距离返回最近结果，搜索到 ${_formatDistance(result.radiusMeters!)}',
+    );
   }
 
   Future<AmapCoordinate> _resolveAmapCoordinate(
@@ -417,6 +654,30 @@ class _LifeHomeScreenState extends State<LifeHomeScreen> {
   }
 }
 
+String _normalizePlaceName(String name) {
+  // 精确匹配只忽略首尾空格和英文大小写，不做“包含”判断，避免再次把相似名称误认成目标地点。
+  return name.trim().toLowerCase();
+}
+
+class _LocationContext {
+  const _LocationContext({
+    required this.deviceLocation,
+    required this.coordinate,
+    required this.summary,
+  });
+
+  final DeviceLocation deviceLocation;
+  final AmapCoordinate coordinate;
+  final AmapLocationSummary summary;
+}
+
+class _SearchOutcome {
+  const _SearchOutcome({required this.result, required this.statusMessage});
+
+  final AmapPlaceSearchResult result;
+  final String statusMessage;
+}
+
 String _formatDistance(int meters) {
   if (meters < 1000) {
     return '${meters}m';
@@ -431,12 +692,20 @@ class _CategoryHome extends StatelessWidget {
     required this.showLocationFallback,
     required this.onCategorySelected,
     required this.onSearchSubmitted,
+    required this.suggestions,
+    required this.isLoadingSuggestions,
+    required this.onSearchChanged,
+    required this.onSuggestionSelected,
   });
 
   final List<LifeCategory> categories;
   final bool showLocationFallback;
   final ValueChanged<LifeCategory> onCategorySelected;
   final ValueChanged<String> onSearchSubmitted;
+  final List<AmapPlaceSuggestion> suggestions;
+  final bool isLoadingSuggestions;
+  final ValueChanged<String> onSearchChanged;
+  final ValueChanged<AmapPlaceSuggestion> onSuggestionSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -489,7 +758,13 @@ class _CategoryHome extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 20),
-                NearbySearchField(onSubmitted: onSearchSubmitted),
+                NearbySearchField(
+                  onSubmitted: onSearchSubmitted,
+                  suggestions: suggestions,
+                  isLoadingSuggestions: isLoadingSuggestions,
+                  onChanged: onSearchChanged,
+                  onSuggestionSelected: onSuggestionSelected,
+                ),
                 const SizedBox(height: 24),
                 const Text(
                   '选择类别',
@@ -638,6 +913,10 @@ class _MapResultsScreen extends StatelessWidget {
     required this.onRetry,
     required this.onFavoriteToggle,
     required this.onSearchSubmitted,
+    required this.suggestions,
+    required this.isLoadingSuggestions,
+    required this.onSearchChanged,
+    required this.onSuggestionSelected,
   });
 
   final LifeCategory category;
@@ -652,6 +931,10 @@ class _MapResultsScreen extends StatelessWidget {
   final VoidCallback onRetry;
   final ValueChanged<Place> onFavoriteToggle;
   final ValueChanged<String> onSearchSubmitted;
+  final List<AmapPlaceSuggestion> suggestions;
+  final bool isLoadingSuggestions;
+  final ValueChanged<String> onSearchChanged;
+  final ValueChanged<AmapPlaceSuggestion> onSuggestionSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -710,6 +993,10 @@ class _MapResultsScreen extends StatelessWidget {
                 : '',
             enabled: !isLoadingPlaces,
             onSubmitted: onSearchSubmitted,
+            suggestions: suggestions,
+            isLoadingSuggestions: isLoadingSuggestions,
+            onChanged: onSearchChanged,
+            onSuggestionSelected: onSuggestionSelected,
           ),
         ),
         Expanded(
@@ -1098,50 +1385,84 @@ class _ResultsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 285),
-      decoration: const BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
-        boxShadow: [
-          BoxShadow(
-            color: Color(0x1A1F2933),
-            blurRadius: 22,
-            offset: Offset(0, -6),
+    return DraggableScrollableSheet(
+      initialChildSize: 0.45,
+      minChildSize: 0.20,
+      maxChildSize: 0.85,
+      snap: false,
+      builder: (context, scrollController) {
+        return Container(
+          key: const ValueKey('results-sheet'),
+          decoration: const BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
+            boxShadow: [
+              BoxShadow(
+                color: Color(0x1A1F2933),
+                blurRadius: 22,
+                offset: Offset(0, -6),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '附近结果',
-                    style: TextStyle(
-                      color: AppColors.ink,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w900,
+          // 标题、拖动条和结果列表共用 Sheet 提供的滚动控制器；面板未到最大高度时
+          // 手势用于改变高度，到达 85% 后同一手势自然切换为滚动列表。
+          child: CustomScrollView(
+            controller: scrollController,
+            slivers: [
+              SliverToBoxAdapter(
+                child: Column(
+                  children: [
+                    const SizedBox(height: 8),
+                    Container(
+                      key: const ValueKey('results-sheet-handle'),
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: AppColors.line,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
-                  ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 10, 20, 8),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              '附近结果',
+                              style: TextStyle(
+                                color: AppColors.ink,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            '${places.length} 个地点',
+                            style: const TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                Text(
-                  '${places.length} 个地点',
-                  style: const TextStyle(color: AppColors.muted, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: isLoading
-                ? const _LoadingResults()
-                : places.isEmpty
-                ? _EmptyResults(message: statusMessage)
-                : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
+              ),
+              if (isLoading)
+                const SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: _LoadingResults(),
+                )
+              else if (places.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: _EmptyResults(message: statusMessage),
+                )
+              else
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
+                  sliver: SliverList.separated(
                     itemBuilder: (context, index) {
                       final place = places[index];
                       return _PlaceRow(
@@ -1153,9 +1474,11 @@ class _ResultsSheet extends StatelessWidget {
                         const Divider(height: 1, color: AppColors.line),
                     itemCount: places.length,
                   ),
+                ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
